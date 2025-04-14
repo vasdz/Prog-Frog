@@ -1,11 +1,11 @@
+#include <iomanip>
 #include <iostream>
 #include <string>
-#include <vector>
-#include <openssl/evp.h>
-#include <iomanip>
-#include <sstream>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <openssl/evp.h>
+#include <sstream>   // Для stringstream
+#include <iomanip>   // Для setw и setfill
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "libssl.lib")
@@ -13,108 +13,69 @@
 
 using namespace std;
 
+const string STATIC_SALT = "mysecretsalt"; // Должна совпадать с серверной
+
 string hash_password(const string& password, const string& salt) {
-    string salted_password = salt + password;
+    string salted = salt + password;
     unsigned char hash[EVP_MAX_MD_SIZE];
-    unsigned int hash_len;
+    unsigned int len;
 
     EVP_MD_CTX* ctx = EVP_MD_CTX_new();
-    if (!ctx) {
-        throw runtime_error("Failed to create EVP_MD_CTX");
-    }
-
-    if (EVP_DigestInit_ex(ctx, EVP_sha256(), NULL) != 1 ||
-        EVP_DigestUpdate(ctx, salted_password.c_str(), salted_password.size()) != 1 ||
-        EVP_DigestFinal_ex(ctx, hash, &hash_len) != 1) {
-        EVP_MD_CTX_free(ctx);
-        throw runtime_error("Failed to compute hash");
-    }
-
+    EVP_DigestInit_ex(ctx, EVP_sha256(), NULL);
+    EVP_DigestUpdate(ctx, salted.c_str(), salted.size());
+    EVP_DigestFinal_ex(ctx, hash, &len);
     EVP_MD_CTX_free(ctx);
 
     stringstream ss;
-    for (unsigned int i = 0; i < hash_len; ++i) {
+    for (unsigned int i = 0; i < len; ++i) {
         ss << hex << setw(2) << setfill('0') << (int)hash[i];
     }
-
     return ss.str();
 }
 
-bool send_to_server(const string& username, const string& password_hash, const string& salt) {
-    WSADATA wsaData;
-    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-        cerr << "WSAStartup failed" << endl;
-        return false;
-    }
+string send_command(const string& cmd, const string& user, const string& pass) {
+    WSADATA wsa;
+    WSAStartup(MAKEWORD(2, 2), &wsa);
 
-    SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (sock == INVALID_SOCKET) {
-        cerr << "Socket creation error: " << WSAGetLastError() << endl;
+    SOCKET sock = socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in addr = { AF_INET, htons(8080) };
+    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+
+    if (connect(sock, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) {
         WSACleanup();
-        return false;
+        return "CONNECTION_ERROR";
     }
 
-    sockaddr_in serv_addr;
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_port = htons(8080);
-    inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr);
+    string hashed_pass = hash_password(pass, STATIC_SALT);
+    string msg = cmd + ":" + user + ":" + hashed_pass;
+    send(sock, msg.c_str(), msg.size(), 0);
 
-    if (connect(sock, (sockaddr*)&serv_addr, sizeof(serv_addr)) == SOCKET_ERROR) {
-        cerr << "Connection failed: " << WSAGetLastError() << endl;
-        closesocket(sock);
-        WSACleanup();
-        return false;
-    }
-
-    string message = username + ":" + salt + ":" + password_hash;
-    send(sock, message.c_str(), message.size(), 0);
-
-    char buffer[1024] = { 0 };
-    recv(sock, buffer, sizeof(buffer), 0);
-    cout << "Server response: " << buffer << endl;
-
+    char buf[1024];
+    int len = recv(sock, buf, sizeof(buf), 0);
     closesocket(sock);
     WSACleanup();
-    return true;
+
+    return len > 0 ? string(buf, len) : "NO_RESPONSE";
 }
 
 int main() {
     while (true) {
-        cout << "\n1. Register\n2. Login\n3. Exit\nChoose option: ";
+        cout << "1. Register\n2. Login\n3. Exit\nChoose: ";
         int choice;
         cin >> choice;
+        cin.ignore();
 
-        string username, password;
+        if (choice == 3) break;
 
-        switch (choice) {
-        case 1: {
-            cout << "Enter username: ";
-            cin >> username;
-            cout << "Enter password: ";
-            cin >> password;
+        string user, pass;
+        cout << "Username: ";
+        getline(cin, user);
+        cout << "Password: ";
+        getline(cin, pass);
 
-            string salt = "static_salt_123";
-            string hashed_password = hash_password(password, salt);
-
-            send_to_server(username, hashed_password, salt);
-            break;
-        }
-        case 2: {
-            cout << "Enter username: ";
-            cin >> username;
-            cout << "Enter password: ";
-            cin >> password;
-
-            string salt = "static_salt_123";
-            string hashed_password = hash_password(password, salt);
-
-            send_to_server(username, hashed_password, salt);
-            break;
-        }
-        case 3:
-            return 0;
-        default:
-            cout << "Invalid choice!" << endl;
-        }
+        string cmd = (choice == 1) ? "REGISTER" : "LOGIN";
+        string resp = send_command(cmd, user, pass);
+        cout << "Server response: " << resp << endl;
     }
+    return 0;
 }
